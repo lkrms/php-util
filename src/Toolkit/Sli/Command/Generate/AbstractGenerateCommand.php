@@ -29,7 +29,9 @@ use SebastianBergmann\Diff\Output\StrictUnifiedDiffOutputBuilder;
 use SebastianBergmann\Diff\Differ;
 use ReflectionClass;
 use ReflectionException;
+use ReflectionFunctionAbstract;
 use ReflectionParameter;
+use ReflectionProperty;
 use ReflectionType;
 
 /**
@@ -126,10 +128,13 @@ abstract class AbstractGenerateCommand extends AbstractCommand
     /**
      * The PHPDoc added before the generated entity
      *
-     * {@see AbstractGenerateCommand::generate()} combines
-     * {@see AbstractGenerateCommand::$Description} and
-     * {@see AbstractGenerateCommand::$PHPDoc} before applying PHPDoc
-     * delimiters.
+     * {@see AbstractGenerateCommand::generate()} combines each of the following
+     * before applying PHPDoc delimiters:
+     *
+     * - {@see AbstractGenerateCommand::$Description}
+     * - {@see AbstractGenerateCommand::$PHPDoc}
+     * - {@see AbstractGenerateCommand::$MagicProperties}
+     * - {@see AbstractGenerateCommand::$MagicMethods}
      */
     protected string $PHPDoc;
 
@@ -141,11 +146,25 @@ abstract class AbstractGenerateCommand extends AbstractCommand
     protected array $Properties = self::MEMBER_STUB;
 
     /**
+     * "Magic" properties of the generated class
+     *
+     * @var array<string,string>
+     */
+    protected array $MagicProperties = [];
+
+    /**
      * Declared methods of the generated entity
      *
      * @var array<AbstractGenerateCommand::VISIBILITY_*,string[]>
      */
     protected array $Methods = self::MEMBER_STUB;
+
+    /**
+     * "Magic" methods of the generated entity
+     *
+     * @var array<string,string>
+     */
+    protected array $MagicMethods = [];
 
     /**
      * Lowercase alias => alias
@@ -667,6 +686,8 @@ abstract class AbstractGenerateCommand extends AbstractCommand
         $phpDoc = Arr::implode($blank, [
             $this->Description ?? '',
             $this->PHPDoc ?? '',
+            implode($line, $this->MagicProperties),
+            implode($line, $this->MagicMethods),
             $this->ApiTag ? '@api' : '',
             '@generated',
         ]);
@@ -840,6 +861,98 @@ abstract class AbstractGenerateCommand extends AbstractCommand
             $this->indent(sprintf('return %s;', $valueCode)),
             '}'
         ];
+    }
+
+    /**
+     * Add a "magic" method to the generated entity
+     *
+     * @param array<ReflectionParameter|string> $params
+     * @param ReflectionType|string $returnType
+     */
+    protected function addMagicMethod(
+        string $name,
+        array $params = [],
+        $returnType = null,
+        ?string $description = null,
+        ?PHPDoc $phpDoc = null,
+        bool $static = false
+    ): void {
+        $callback = function (string $name): ?string {
+            /** @var class-string $name */
+            return $this->getFqcnAlias($name, null, false);
+        };
+
+        foreach ($params as &$param) {
+            if ($param instanceof ReflectionParameter) {
+                if ($phpDoc && ($tag = $phpDoc->Params[$param->getName()] ?? null)) {
+                    $type = $this->getPHPDocTypeFromTag($tag, $phpDoc->Templates, $param);
+                } else {
+                    $type = null;
+                }
+                $param = Reflect::getParameterDeclaration(
+                    $param,
+                    $this->getClassPrefix(),
+                    $callback,
+                    $type,
+                    null,
+                    true,
+                );
+            }
+        }
+        $params = implode(', ', $params);
+
+        if ($returnType instanceof ReflectionType) {
+            $returnType = Reflect::getTypeDeclaration(
+                $returnType,
+                $this->getClassPrefix(),
+                $callback,
+            );
+        }
+
+        $parts = ['@method'];
+        if ($static) {
+            $parts[] = 'static';
+        }
+        $parts[] = $returnType === null ? 'mixed' : $returnType;
+        $parts[] = "{$name}({$params})";
+        if ($description !== null) {
+            $description = trim($description);
+            if ($description !== '') {
+                $parts[] = $description;
+            }
+        }
+        $this->MagicMethods[$name] = implode(' ', $parts);
+    }
+
+    /**
+     * @param array<string,TemplateTag> $templates
+     * @param ReflectionClass<object>|ReflectionFunctionAbstract|ReflectionParameter|ReflectionProperty $reflector
+     */
+    protected function getPHPDocTypeFromTag(
+        AbstractTag $tag,
+        array $templates,
+        $reflector
+    ): ?string {
+        $type = $tag->getType();
+        if ($type === null) {
+            return null;
+        }
+        $declaring = $reflector instanceof ReflectionProperty
+            ? $reflector->getDeclaringClass()
+            : ($reflector instanceof ReflectionParameter
+                ? $reflector->getDeclaringFunction()
+                : $reflector);
+        $namespace = $declaring->getNamespaceName();
+        $filename = $declaring->getFileName();
+        if ($filename === false) {
+            $filename = null;
+        }
+        return $this->getPHPDocTypeAlias(
+            $type,
+            $templates,
+            $namespace,
+            $filename,
+        );
     }
 
     /**
